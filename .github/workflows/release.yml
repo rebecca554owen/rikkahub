@@ -1,0 +1,100 @@
+name: Release Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '输入发布的 tag 名称'
+        required: true
+        default: 'v1.0.0'
+  push:
+    tags:
+      - 'v*'
+    branches:
+      - master
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+      
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Get release tag
+      id: get-tag
+      shell: bash
+      run: |
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+        elif [ "${{ github.event_name }}" = "push" ] && [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+          echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+        else
+          echo "tag=v1.0.0" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Validate inputs
+      run: |
+        # 验证tag格式
+        if [[ ! "${{ steps.get-tag.outputs.tag }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          echo "错误：标签格式无效，应为vx.x.x"
+          exit 1
+        fi
+
+    - name: Set up JDK
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: '17'
+
+    - name: Gradle cache
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.gradle/caches
+          ~/.gradle/wrapper
+        key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }} 
+        
+    - name: Add google-services.json
+      run: |
+        echo '${{ secrets.GOOGLE_SERVICES_JSON }}' > app/google-services.json
+      env:
+        GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+
+    - name: Gradle Build
+      run: |
+        chmod +x gradlew
+        ./gradlew assembleRelease --warning-mode all --stacktrace
+
+    - name: Prepare APK
+      run: |
+        APK_PATH=$(find app/build/outputs/apk -name '*arm64-v8a*.apk' | head -1)
+        if [ -z "$APK_PATH" ]; then
+          echo "错误：未找到APK文件"
+          exit 1
+        fi
+        APK_NAME=$(basename "$APK_PATH")
+        echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
+        echo "APK_NAME=$APK_NAME" >> $GITHUB_ENV
+
+    - name: Record build time
+      run: |
+        echo "BUILD_TIME=$(TZ='Asia/Shanghai' date +'%Y-%m-%d %H:%M:%S')" >> $GITHUB_ENV
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ env.APK_NAME }}
+        path: ${{ env.APK_PATH }}
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v2
+      if: success()
+      with:
+        files: ${{ env.APK_PATH }}
+        tag_name: ${{ steps.get-tag.outputs.tag }}
+        name: Release ${{ steps.get-tag.outputs.tag }}
+        body: "编译于：${{ env.BUILD_TIME }}"
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
